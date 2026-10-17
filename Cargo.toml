@@ -1,0 +1,27 @@
+[package]
+name = "flpdf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+mupdf = "0.4"
+arboard = "3"
+clap = { version = "4", features = ["derive"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Fast debug builds — optimize mupdf but keep our code debuggable
+[profile.dev.package.mupdf]
+opt-level = 3
+[profile.dev.package.mupdf-sys]
+opt-level = 3
