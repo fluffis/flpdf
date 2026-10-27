@@ -1,5 +1,5 @@
 use mupdf::pdf::PdfDocument;
-use mupdf::{Colorspace, Matrix, TextPageOptions};
+use mupdf::{Colorspace, Matrix, MetadataName, TextPageOptions};
 use std::path::Path;
 
 pub struct PdfDoc {
@@ -83,6 +83,31 @@ impl PdfDoc {
         }
 
         Ok(PageText { chars })
+    }
+
+    pub fn metadata(&self) -> Vec<(String, String)> {
+        let fields = [
+            ("Title", MetadataName::Title),
+            ("Author", MetadataName::Author),
+            ("Subject", MetadataName::Subject),
+            ("Keywords", MetadataName::Keywords),
+            ("Creator", MetadataName::Creator),
+            ("Producer", MetadataName::Producer),
+            ("Creation Date", MetadataName::CreationDate),
+            ("Modification Date", MetadataName::ModDate),
+            ("Format", MetadataName::Format),
+            ("Encryption", MetadataName::Encryption),
+        ];
+        let mut result = Vec::new();
+        for (label, name) in fields {
+            if let Ok(value) = self.doc.metadata(name) {
+                if !value.is_empty() {
+                    result.push((label.to_string(), value));
+                }
+            }
+        }
+        result.push(("Pages".to_string(), self.page_count.to_string()));
+        result
     }
 
     pub fn search_page(&self, page_num: u32, query: &str, scale: f32) -> Result<Vec<[f32; 4]>, mupdf::Error> {

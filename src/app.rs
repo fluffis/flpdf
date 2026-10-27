@@ -49,6 +49,14 @@ pub struct FlpdfApp {
     // Status
     status_msg: String,
     show_full_path: bool,
+
+    // Metadata modal
+    show_metadata: bool,
+    metadata_cache: Vec<(String, String)>,
+
+    // Arrow key scroll nudge (in logical points, applied next frame)
+    arrow_scroll_delta: f32,
+    last_scroll_offset: f32,
 }
 
 impl FlpdfApp {
@@ -77,6 +85,10 @@ impl FlpdfApp {
             state: AppState::load(),
             status_msg: String::new(),
             show_full_path: false,
+            show_metadata: false,
+            metadata_cache: Vec::new(),
+            arrow_scroll_delta: 0.0,
+            last_scroll_offset: 0.0,
         };
 
         // Set MuPDF anti-aliasing to max (8 bits for text and graphics)
@@ -389,6 +401,14 @@ impl FlpdfApp {
             self.show_go_to_dialog = !self.show_go_to_dialog;
             self.go_to_page_buf.clear();
         }
+        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::M)) {
+            if self.doc.is_some() {
+                self.show_metadata = !self.show_metadata;
+                if self.show_metadata {
+                    self.metadata_cache = self.doc.as_ref().unwrap().metadata();
+                }
+            }
+        }
         if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::O)) {
             self.open_file_dialog();
         }
@@ -417,6 +437,7 @@ impl FlpdfApp {
         if ctx.input_mut(|i| i.consume_key(none, egui::Key::Escape)) {
             self.show_search = false;
             self.show_go_to_dialog = false;
+            self.show_metadata = false;
             self.selection.selected.clear();
         }
         if ctx.input_mut(|i| i.consume_key(none, egui::Key::PageDown)) {
@@ -431,11 +452,21 @@ impl FlpdfApp {
             self.nav_page = Some(prev);
             self.scroll_to_page = Some(prev);
         }
-        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::Home)) {
-            self.scroll_to_page = Some(0);
+        if ctx.input_mut(|i| i.consume_key(none, egui::Key::ArrowDown)) {
+            self.arrow_scroll_delta += 1.0;
+            self.nav_page = None;
         }
-        if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::End)) {
+        if ctx.input_mut(|i| i.consume_key(none, egui::Key::ArrowUp)) {
+            self.arrow_scroll_delta -= 1.0;
+            self.nav_page = None;
+        }
+        if ctx.input_mut(|i| i.consume_key(none, egui::Key::Home)) {
+            self.scroll_to_page = Some(0);
+            self.nav_page = None;
+        }
+        if ctx.input_mut(|i| i.consume_key(none, egui::Key::End)) {
             self.scroll_to_page = Some(self.page_count().saturating_sub(1));
+            self.nav_page = None;
         }
     }
 }
@@ -630,14 +661,23 @@ impl eframe::App for FlpdfApp {
             let mut scroll_area = egui::ScrollArea::vertical()
                 .auto_shrink([false; 2]);
 
+            // Arrow key scroll: 10% of viewport height per press
+            let arrow_delta = self.arrow_scroll_delta;
+            self.arrow_scroll_delta = 0.0;
+            let viewport_height = ui.available_height();
+
             if let Some(offset) = scroll_target {
                 scroll_area = scroll_area.vertical_scroll_offset(offset);
+            } else if arrow_delta != 0.0 {
+                let step = viewport_height * 0.1;
+                let new_offset = (self.last_scroll_offset + arrow_delta * step).max(0.0);
+                scroll_area = scroll_area.vertical_scroll_offset(new_offset);
             }
 
             let clip = ui.clip_rect();
             let mut visible_this_frame: Vec<u32> = Vec::new();
 
-            scroll_area.show(ui, |ui| {
+            let scroll_output = scroll_area.show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     for page_num in 0..page_count {
                         // Use precomputed height for layout, avoiding a render
@@ -784,6 +824,7 @@ impl eframe::App for FlpdfApp {
                     }
                 });
             });
+            self.last_scroll_offset = scroll_output.state.offset.y;
 
             // Update current page from visible pages, but not on the frame
             // where we just programmatically scrolled (the old page may
@@ -795,6 +836,30 @@ impl eframe::App for FlpdfApp {
             }
             self.evict_distant_textures();
         });
+
+        // Metadata modal
+        if self.show_metadata {
+            let mut open = self.show_metadata;
+            egui::Window::new("PDF Metadata")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    egui::Grid::new("metadata_grid")
+                        .num_columns(2)
+                        .spacing([16.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (label, value) in &self.metadata_cache {
+                                ui.strong(label);
+                                ui.label(value);
+                                ui.end_row();
+                            }
+                        });
+                });
+            self.show_metadata = open;
+        }
 
         // Handle dropped files
         let dropped: Option<String> = ctx.input(|i| {
