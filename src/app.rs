@@ -24,6 +24,7 @@ pub struct FlpdfApp {
 
     // Navigation
     current_page: u32,
+    nav_page: Option<u32>, // explicit page set by PageUp/PageDown, overrides visible-based tracking
     scroll_to_page: Option<u32>,
     go_to_page_buf: String,
     show_go_to_dialog: bool,
@@ -47,6 +48,7 @@ pub struct FlpdfApp {
 
     // Status
     status_msg: String,
+    show_full_path: bool,
 }
 
 impl FlpdfApp {
@@ -60,6 +62,7 @@ impl FlpdfApp {
             zoom_index: DEFAULT_ZOOM_INDEX,
             pixels_per_point: 1.0, // updated each frame from egui
             current_page: 0,
+            nav_page: None,
             scroll_to_page: None,
             go_to_page_buf: String::new(),
             show_go_to_dialog: false,
@@ -73,6 +76,7 @@ impl FlpdfApp {
             clipboard: arboard::Clipboard::new().ok(),
             state: AppState::load(),
             status_msg: String::new(),
+            show_full_path: false,
         };
 
         // Set MuPDF anti-aliasing to max (8 bits for text and graphics)
@@ -328,8 +332,9 @@ impl FlpdfApp {
         let ctrl = egui::Modifiers::COMMAND;
         let none = egui::Modifiers::NONE;
 
-        // Ctrl+scroll wheel zoom
+        // Ctrl+scroll wheel zoom; detect manual scroll to reset nav_page
         let mut zoom_scroll: f32 = 0.0;
+        let mut manual_scroll = false;
         ctx.input_mut(|i| {
             let ctrl_held = i.modifiers.ctrl;
             if ctrl_held {
@@ -345,8 +350,21 @@ impl FlpdfApp {
                 }
                 i.smooth_scroll_delta = egui::Vec2::ZERO;
                 i.raw_scroll_delta = egui::Vec2::ZERO;
+            } else {
+                // Non-ctrl scroll = manual user scroll
+                if i.smooth_scroll_delta.y.abs() > 0.0 || i.raw_scroll_delta.y.abs() > 0.0 {
+                    manual_scroll = true;
+                }
+                for event in &i.events {
+                    if matches!(event, egui::Event::MouseWheel { .. }) {
+                        manual_scroll = true;
+                    }
+                }
             }
         });
+        if manual_scroll {
+            self.nav_page = None;
+        }
         if zoom_scroll > 0.0 {
             self.zoom_in();
         } else if zoom_scroll < 0.0 {
@@ -402,11 +420,15 @@ impl FlpdfApp {
             self.selection.selected.clear();
         }
         if ctx.input_mut(|i| i.consume_key(none, egui::Key::PageDown)) {
-            let next = (self.current_page + 1).min(self.page_count().saturating_sub(1));
+            let base = self.nav_page.unwrap_or(self.current_page);
+            let next = (base + 1).min(self.page_count().saturating_sub(1));
+            self.nav_page = Some(next);
             self.scroll_to_page = Some(next);
         }
         if ctx.input_mut(|i| i.consume_key(none, egui::Key::PageUp)) {
-            let prev = self.current_page.saturating_sub(1);
+            let base = self.nav_page.unwrap_or(self.current_page);
+            let prev = base.saturating_sub(1);
+            self.nav_page = Some(prev);
             self.scroll_to_page = Some(prev);
         }
         if ctx.input_mut(|i| i.consume_key(ctrl, egui::Key::Home)) {
@@ -551,7 +573,35 @@ impl eframe::App for FlpdfApp {
         // Bottom status bar
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(&self.status_msg);
+                if !self.file_path.is_empty() {
+                    let name_part = if self.show_full_path {
+                        self.file_path.clone()
+                    } else {
+                        std::path::Path::new(&self.file_path)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    };
+                    let page_count_str = self.doc.as_ref()
+                        .map(|d| format!(" — {} pages", d.page_count()))
+                        .unwrap_or_default();
+                    let display_text = format!("{}{}", name_part, page_count_str);
+                    let response = ui.add(
+                        egui::Label::new(&display_text).sense(egui::Sense::click()),
+                    );
+                    if response.clicked() {
+                        self.show_full_path = !self.show_full_path;
+                    }
+                    if response.secondary_clicked() {
+                        if let Some(cb) = &mut self.clipboard {
+                            let _ = cb.set_text(&display_text);
+                            self.status_msg = "Copied to clipboard".to_string();
+                        }
+                    }
+                } else {
+                    ui.label(&self.status_msg);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("Ctrl+F: Search | Ctrl+G: Go to | Ctrl+O: Open | Ctrl+C: Copy");
                 });
@@ -570,8 +620,10 @@ impl eframe::App for FlpdfApp {
             }
 
             // Scroll-to-page offset
+            let mut scrolled_to_page = false;
             let scroll_target = self.scroll_to_page.take().map(|target_page| {
                 self.current_page = target_page;
+                scrolled_to_page = true;
                 self.page_y_offset(target_page)
             });
 
@@ -733,9 +785,13 @@ impl eframe::App for FlpdfApp {
                 });
             });
 
-            // Update current page and evict distant textures
-            if let Some(first_visible) = visible_this_frame.first() {
-                self.current_page = *first_visible;
+            // Update current page from visible pages, but not on the frame
+            // where we just programmatically scrolled (the old page may
+            // still be partially visible at the top).
+            if !scrolled_to_page {
+                if let Some(first_visible) = visible_this_frame.first() {
+                    self.current_page = *first_visible;
+                }
             }
             self.evict_distant_textures();
         });
